@@ -1,0 +1,95 @@
+dependencies:
+  espp/base_component:
+    component_hash: fe5c6b467f8896dfe159ecb276d63afd1bd2506b5755f46b2a6945eb82930402
+    dependencies:
+    - name: espp/logger
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.0
+  espp/base_peripheral:
+    component_hash: 5829747f7be52667dcc74957c9757c58e9e9372982fb80059265bba80049765a
+    dependencies:
+    - name: espp/base_component
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.0
+  espp/bmi270:
+    component_hash: 4553f037aaaba0ec96b6ba1931d27f548a5bb26e905a1b0c868ba48a8da02bf3
+    dependencies:
+    - name: espp/base_peripheral
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: espp/math
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.1.0
+  espp/format:
+    component_hash: 5ad1f5d2a3cdf8f6ba37cf59faecd36f23cd91ab516e69a73aa6b6e2d6f32a05
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.0
+  espp/logger:
+    component_hash: 346715d1a1e0d5dfdf8d0078215c33f4356bc1161b46acb4068b2ca95f3bf758
+    dependencies:
+    - name: espp/format
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.0
+  espp/math:
+    component_hash: 2a7851ce6b92b71e3a3b0e6b79c2233e849cf0e1d823fc67ff1e92b27ca26d9e
+    dependencies:
+    - name: espp/format
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.0
+  idf:
+    source:
+      type: idf
+    version: 5.5.1
+direct_dependencies:
+- espp/bmi270
+- idf
+manifest_hash: 9317592d5fcdef554c94c1e28b8a524690077e7300cf699f6e79dc3901865489
+target: esp32s3
+version: 2.0.0
