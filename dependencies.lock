@@ -1,95 +1,64 @@
 dependencies:
-  espp/base_component:
-    component_hash: fe5c6b467f8896dfe159ecb276d63afd1bd2506b5755f46b2a6945eb82930402
+  espressif/bmi270_sensor:
+    component_hash: fac23a5ecd2effdac0fb0705988d853745b8ffb99a384f87a307b3b25d15d432
     dependencies:
-    - name: espp/logger
+    - name: espressif/cmake_utilities
       registry_url: https://components.espressif.com
       require: private
-      version: '>=1.0'
+      version: 0.*
+    - name: espressif/i2c_bus
+      registry_url: https://components.espressif.com
+      require: public
+      version: '*'
     - name: idf
       require: private
-      version: '>=5.0'
-    source:
-      registry_url: https://components.espressif.com
-      type: service
-    version: 1.1.0
-  espp/base_peripheral:
-    component_hash: 5829747f7be52667dcc74957c9757c58e9e9372982fb80059265bba80049765a
-    dependencies:
-    - name: espp/base_component
-      registry_url: https://components.espressif.com
-      require: private
-      version: '>=1.0'
-    - name: idf
-      require: private
-      version: '>=5.0'
-    source:
-      registry_url: https://components.espressif.com
-      type: service
-    version: 1.1.0
-  espp/bmi270:
-    component_hash: 4553f037aaaba0ec96b6ba1931d27f548a5bb26e905a1b0c868ba48a8da02bf3
-    dependencies:
-    - name: espp/base_peripheral
-      registry_url: https://components.espressif.com
-      require: private
-      version: '>=1.0'
-    - name: espp/math
-      registry_url: https://components.espressif.com
-      require: private
-      version: '>=1.0'
-    - name: idf
-      require: private
-      version: '>=5.0'
+      version: '>=5.3'
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.1.0
-  espp/format:
-    component_hash: 5ad1f5d2a3cdf8f6ba37cf59faecd36f23cd91ab516e69a73aa6b6e2d6f32a05
+    version: 0.1.1
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
     dependencies:
     - name: idf
       require: private
-      version: '>=5.0'
+      version: '>=4.1'
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.1.0
-  espp/logger:
-    component_hash: 346715d1a1e0d5dfdf8d0078215c33f4356bc1161b46acb4068b2ca95f3bf758
+    version: 0.5.3
+  espressif/esp-dsp:
+    component_hash: ed9ac175b14e0414399a2b33c525579414b5bad19a2a67b12ea212def96f9a98
     dependencies:
-    - name: espp/format
-      registry_url: https://components.espressif.com
-      require: private
-      version: '>=1.0'
     - name: idf
       require: private
-      version: '>=5.0'
+      version: '>=4.2'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
-    version: 1.1.0
-  espp/math:
-    component_hash: 2a7851ce6b92b71e3a3b0e6b79c2233e849cf0e1d823fc67ff1e92b27ca26d9e
+    version: 1.8.2
+  espressif/i2c_bus:
+    component_hash: 804ec068d163570fd367b279a310ca383484630d2310c586b50def0bcf21de13
     dependencies:
-    - name: espp/format
+    - name: espressif/cmake_utilities
       registry_url: https://components.espressif.com
       require: private
-      version: '>=1.0'
+      version: '*'
     - name: idf
       require: private
-      version: '>=5.0'
+      version: '>=4.0'
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.1.0
+    version: 1.5.1
   idf:
     source:
       type: idf
     version: 5.5.1
 direct_dependencies:
-- espp/bmi270
+- espressif/bmi270_sensor
+- espressif/esp-dsp
 - idf
-manifest_hash: 9317592d5fcdef554c94c1e28b8a524690077e7300cf699f6e79dc3901865489
+manifest_hash: 6067deefff40c8734b7892f03f7041b844212d298a710f25c794ec6e75c39301
 target: esp32s3
 version: 2.0.0
