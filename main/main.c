@@ -18,11 +18,7 @@
 #define BUTTRY_VOLTAGE 12.0//电池电压
 #define DUTY_RESOLUTION ((1<<10)-1)//占空比分辨率
 #define BASE_PWM_DUTY (MOTOR_VOLTAGE/BUTTRY_VOLTAGE*(float)DUTY_RESOLUTION)//基础占空比
-#define TARGET_RPM 300.0//目标转速
-#define GEAR_RATIO 20.049//减速比
-#define ENCODER_PPR 13.0*4//每转脉冲数
-#define CONTROL_PERIOD_MS 5e-3//控制周期
-#define TARGET_PULSES_PER_PERIOD (TARGET_RPM*GEAR_RATIO*ENCODER_PPR*CONTROL_PERIOD_MS/60.0)//目标每周期脉冲数
+#define TARGET_PULSES_PER_PERIOD 0//目标每周期脉冲数
 
 typedef struct{
     gpio_num_t pcnt_s1_num;
@@ -38,26 +34,30 @@ typedef struct{
 }motor_hardware_t;
 
 typedef struct{
-    float target_pulses;
     int current_pulses;
-    float speed_error;
-    float last_speed_error;
-    double duty;
+    float pulse_error;
+    float last_pulse_error;
     float Kp;
     float Ki;
-}motor_software_t;
-
-typedef enum{
-    stop=0,
-    forward=1,
-    backward=2,
-}motor_status_t;
+    double speed_output;
+}speed_controller_t;
 
 typedef struct{
-    motor_hardware_t hw;
-    motor_software_t sw;
-    volatile motor_status_t status;
-}motor_t;
+    float target_angle;
+    float current_angle;
+    float angle_error;
+    float last_angle_error;
+    float Kp;
+    float Kd;
+    double duty;
+}balance_controller_t;
+
+typedef struct{
+    motor_hardware_t left_motor;
+    motor_hardware_t right_motor;
+    speed_controller_t speed;
+    balance_controller_t balance;
+}chassis_t;
 
 typedef struct{
     i2c_bus_handle_t i2c_bus_hdl;
@@ -73,8 +73,8 @@ typedef struct{
 }bmi270_t;
 
 static volatile TaskHandle_t xTaskToNotify=NULL;//任务通知代替二进制信号量唤醒任务
-static motor_t left_motor={
-    .hw={
+static chassis_t chassis={
+    .left_motor={
         .pcnt_s1_num=GPIO_NUM_9,
         .pcnt_s2_num=GPIO_NUM_10,
         .pcnt_channel_s1_hdl=NULL,
@@ -84,39 +84,35 @@ static motor_t left_motor={
         .pwm_num=GPIO_NUM_11,
         .in1_num=GPIO_NUM_12,
         .in2_num=GPIO_NUM_13,
-    },
-    .sw={
-        .current_pulses=0,
-        .speed_error=0,
-        .last_speed_error=0,
-        .duty=0,
-        .Kp=2.0,
-        .Ki=0.02,
-    },
-    .status=stop,
-};
-static motor_t right_motor={
-    .hw={
+        },
+    .right_motor={
         .pcnt_s1_num=GPIO_NUM_38,
         .pcnt_s2_num=GPIO_NUM_39,
         .pcnt_channel_s1_hdl=NULL,
         .pcnt_channel_s2_hdl=NULL,
         .pcnt_unit_hdl=NULL,
         .ledc_channel=LEDC_CHANNEL_1,
-        .pwm_num=GPIO_NUM_40,
-        .in1_num=GPIO_NUM_41,
-        .in2_num=GPIO_NUM_42,
-    },
-    .sw={
-        .target_pulses=TARGET_PULSES_PER_PERIOD,
+            .pwm_num=GPIO_NUM_40,
+            .in1_num=GPIO_NUM_41,
+            .in2_num=GPIO_NUM_42,
+        },
+    .speed={
         .current_pulses=0,
-        .speed_error=0,
-        .last_speed_error=0,
-        .duty=0,
+        .pulse_error=0,
+        .last_pulse_error=0,
         .Kp=2.0,
         .Ki=0.02,
+        .speed_output=0,
     },
-    .status=stop,
+    .balance={
+        .target_angle=0,
+        .current_angle=0,
+        .angle_error=0,
+        .last_angle_error=0,
+        .Kp=0,
+        .Kd=0,
+        .duty=0,
+    },
 };
 static bmi270_t bmi270={
     .i2c_bus_hdl=NULL,
@@ -235,11 +231,11 @@ static esp_err_t bmi270_enable(bmi270_t *sensor)
     return (rslt == BMI2_OK) ? ESP_OK : ESP_FAIL;
 }
 
-void gpio_init(const motor_t *motor,const bmi270_t *sensor)//GPIO初始化
+void gpio_init(const motor_hardware_t *motor,const bmi270_t *sensor)//GPIO初始化
 {
     gpio_config_t motor_gpio_conf={
         .mode=GPIO_MODE_OUTPUT,//输出模式
-        .pin_bit_mask=(1ULL<<motor->hw.in1_num)|(1ULL<<motor->hw.in2_num),//配置in1_num、in2_num为输出
+        .pin_bit_mask=(1ULL<<motor->in1_num)|(1ULL<<motor->in2_num),//配置in1_num、in2_num为输出
     };
     gpio_config_t sensor_gpio_conf={
         .mode=GPIO_MODE_INPUT,//输入模式
@@ -255,7 +251,7 @@ void gpio_init(const motor_t *motor,const bmi270_t *sensor)//GPIO初始化
     return;
 }
 
-void pcnt_init(motor_t *motor)//pcnt初始化
+void pcnt_init(motor_hardware_t *motor)//pcnt初始化
 {
     //s1通道：上升沿+1，下降沿-1，高电平翻转，低电平保持
     //s2通道：上升沿+1，下降沿-1，高电平保持，低电平翻转
@@ -264,43 +260,43 @@ void pcnt_init(motor_t *motor)//pcnt初始化
         .low_limit=-1000,//最小计数值
         .high_limit=1000,//最大计数值
     };
-    ESP_ERROR_CHECK(pcnt_new_unit(&pcnt_unit_cfg,&motor->hw.pcnt_unit_hdl));//新建pcnt单元并判断是否成功
+    ESP_ERROR_CHECK(pcnt_new_unit(&pcnt_unit_cfg,&motor->pcnt_unit_hdl));//新建pcnt单元并判断是否成功
 
     pcnt_chan_config_t pcnt_channel_s1_cfg={//配置pcnt通道1
-        .edge_gpio_num=motor->hw.pcnt_s1_num,//输入s1边沿
-        .level_gpio_num=motor->hw.pcnt_s2_num,//输入s2电平
+        .edge_gpio_num=motor->pcnt_s1_num,//输入s1边沿
+        .level_gpio_num=motor->pcnt_s2_num,//输入s2电平
     };
     pcnt_chan_config_t pcnt_channel_s2_cfg={//配置pcnt通道2
-        .edge_gpio_num=motor->hw.pcnt_s2_num,//输入s2边沿
-        .level_gpio_num=motor->hw.pcnt_s1_num,//输入s1电平
+        .edge_gpio_num=motor->pcnt_s2_num,//输入s2边沿
+        .level_gpio_num=motor->pcnt_s1_num,//输入s1电平
     };
-    ESP_ERROR_CHECK(pcnt_new_channel(motor->hw.pcnt_unit_hdl,&pcnt_channel_s1_cfg,&motor->hw.pcnt_channel_s1_hdl));//新建pcnt通道1并判断是否成功
-    ESP_ERROR_CHECK(pcnt_new_channel(motor->hw.pcnt_unit_hdl,&pcnt_channel_s2_cfg,&motor->hw.pcnt_channel_s2_hdl));//新建pcnt通道2并判断是否成功
+    ESP_ERROR_CHECK(pcnt_new_channel(motor->pcnt_unit_hdl,&pcnt_channel_s1_cfg,&motor->pcnt_channel_s1_hdl));//新建pcnt通道1并判断是否成功
+    ESP_ERROR_CHECK(pcnt_new_channel(motor->pcnt_unit_hdl,&pcnt_channel_s2_cfg,&motor->pcnt_channel_s2_hdl));//新建pcnt通道2并判断是否成功
 
     pcnt_glitch_filter_config_t filte_cfg={//配置毛刺过滤器
         .max_glitch_ns=1000,//过滤1000ns以下毛刺
     };
-    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(motor->hw.pcnt_unit_hdl, &filte_cfg));//新建毛刺过滤器并判断是否成功
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(motor->hw.pcnt_channel_s1_hdl,
+    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(motor->pcnt_unit_hdl, &filte_cfg));//新建毛刺过滤器并判断是否成功
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(motor->pcnt_channel_s1_hdl,
                                                 PCNT_CHANNEL_EDGE_ACTION_INCREASE,
                                                 PCNT_CHANNEL_EDGE_ACTION_DECREASE));//上升沿+1，下降沿-1                                           
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(motor->hw.pcnt_channel_s1_hdl,
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(motor->pcnt_channel_s1_hdl,
                                                 PCNT_CHANNEL_LEVEL_ACTION_INVERSE,
                                                 PCNT_CHANNEL_LEVEL_ACTION_KEEP));//高电平翻转，低电平保持                                            
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(motor->hw.pcnt_channel_s2_hdl,
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(motor->pcnt_channel_s2_hdl,
                                                 PCNT_CHANNEL_EDGE_ACTION_INCREASE,
                                                 PCNT_CHANNEL_EDGE_ACTION_DECREASE));//上升沿+1，下降沿-1                                          
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(motor->hw.pcnt_channel_s2_hdl,
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(motor->pcnt_channel_s2_hdl,
                                                 PCNT_CHANNEL_LEVEL_ACTION_KEEP,
                                                 PCNT_CHANNEL_LEVEL_ACTION_INVERSE));//高电平保持，低电平翻转
 
-    ESP_ERROR_CHECK(pcnt_unit_enable(motor->hw.pcnt_unit_hdl));//使能pcnt单元
-    ESP_ERROR_CHECK(pcnt_unit_clear_count(motor->hw.pcnt_unit_hdl));//清除计数值
-    ESP_ERROR_CHECK(pcnt_unit_start(motor->hw.pcnt_unit_hdl));//启动pcnt单元
+    ESP_ERROR_CHECK(pcnt_unit_enable(motor->pcnt_unit_hdl));//使能pcnt单元
+    ESP_ERROR_CHECK(pcnt_unit_clear_count(motor->pcnt_unit_hdl));//清除计数值
+    ESP_ERROR_CHECK(pcnt_unit_start(motor->pcnt_unit_hdl));//启动pcnt单元
     return;
 }
 
-void ledc_init(motor_t *motor)
+void ledc_init(motor_hardware_t *motor)
 {
     ledc_timer_config_t ledc_timer_cfg={
         .speed_mode=LEDC_LOW_SPEED_MODE,
@@ -311,9 +307,9 @@ void ledc_init(motor_t *motor)
     };
     ledc_timer_config(&ledc_timer_cfg);
     ledc_channel_config_t ledc_channel_cfg={
-        .gpio_num=motor->hw.pwm_num,
+        .gpio_num=motor->pwm_num,
         .speed_mode=LEDC_LOW_SPEED_MODE,
-        .channel=motor->hw.ledc_channel,
+        .channel=motor->ledc_channel,
         .intr_type=LEDC_INTR_DISABLE,
         .timer_sel=LEDC_TIMER_0,
         .duty=0,
@@ -322,64 +318,71 @@ void ledc_init(motor_t *motor)
     ledc_channel_config(&ledc_channel_cfg);
 }
 
-esp_err_t read_pcnt(motor_t *motor)
+void read_pcnt(motor_hardware_t *motor, int *current_pulses)
 {
-    esp_err_t ret = pcnt_unit_get_count(motor->hw.pcnt_unit_hdl,&(motor->sw.current_pulses));
-    if (ret != ESP_OK) 
-        return ESP_FAIL;
-    ret = pcnt_unit_clear_count(motor->hw.pcnt_unit_hdl);
-    if (ret != ESP_OK) 
-        return ESP_FAIL;
-    return ESP_OK;
+    esp_err_t ret = pcnt_unit_get_count(motor->pcnt_unit_hdl, current_pulses);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get PCNT count");
+        return;
+    }
+    pcnt_unit_clear_count(motor->pcnt_unit_hdl);
 }
 
-esp_err_t read_bmi270(bmi270_t *sensor)
+void read_bmi270(bmi270_t *sensor)
 {
     int8_t rslt = bmi2_get_sensor_data(&sensor->sensor_data, sensor->bmi270_hdl);
     bmi2_error_codes_print_result(rslt);
-    if (rslt != BMI2_OK) 
-        return ESP_FAIL;
-    return ESP_OK;
+}
+
+void speed_control(chassis_t *chassis,int average_pulses)
+{
+    chassis->speed.pulse_error = TARGET_PULSES_PER_PERIOD - average_pulses;
+    chassis->speed.speed_output += chassis->speed.Kp * (chassis->speed.pulse_error - chassis->speed.last_pulse_error)
+                                   + chassis->speed.Ki * chassis->speed.pulse_error;
+    chassis->speed.last_pulse_error = chassis->speed.pulse_error;
 }
 
 void motor_control_task(void *pvParameters)
 {
     uint32_t ulNotificationValue;
-    esp_err_t ret;
-    const TickType_t xMaxBlockTime=pdMS_TO_TICKS(5);  
-    configASSERT(xTaskToNotify==NULL);
-    xTaskToNotify=xTaskGetCurrentTaskHandle();
-    ulNotificationValue = ulTaskNotifyTake(pdTRUE,xMaxBlockTime);
-    if(ulNotificationValue==1)
+    const TickType_t xMaxBlockTime=pdMS_TO_TICKS(5);
+    int pulse_average=0;
+    while(1)
     {
-        ret = read_pcnt(&left_motor);
-        if (ret != ESP_OK)
-            ESP_LOGE(TAG, "Failed to read left motor PCNT");
-
-        ret = read_pcnt(&right_motor);
-        if (ret != ESP_OK) 
-            ESP_LOGE(TAG, "Failed to read right motor PCNT");
-
-        ret = read_bmi270(&bmi270);
-        if (ret != ESP_OK) 
-            ESP_LOGE(TAG, "Failed to read BMI270 sensor data");
+        configASSERT(xTaskToNotify==NULL);
+        xTaskToNotify=xTaskGetCurrentTaskHandle();
+        ulNotificationValue = ulTaskNotifyTake(pdTRUE,xMaxBlockTime);
+        if(ulNotificationValue==1)
+        {
+            //外环速度环
+            int left_pulses = 0;
+            int right_pulses = 0;
+            read_pcnt(&chassis.left_motor, &left_pulses);
+            read_pcnt(&chassis.right_motor, &right_pulses);
+            pulse_average=(left_pulses+right_pulses)/2;
+            speed_control(&chassis,pulse_average);
+            //内环直立环
+            read_bmi270(&bmi270);
+            
+        }
+        else
+            ESP_LOGW(TAG,"Main task timeout");
     }
-
 }
 
 void app_main(void)
 {
     ESP_ERROR_CHECK(bmi270_init(&bmi270));//BMI270初始化
     ESP_ERROR_CHECK(bmi270_enable(&bmi270));//BMI270使能
-    gpio_init(&left_motor,&bmi270);//GPIO初始化
-    gpio_init(&right_motor,&bmi270);//GPIO初始化
-    gpio_set_level(left_motor.hw.in1_num,0);
-    gpio_set_level(left_motor.hw.in2_num,0);
-    gpio_set_level(right_motor.hw.in1_num,0);
-    gpio_set_level(right_motor.hw.in2_num,0);    
-    pcnt_init(&left_motor);//左电机pcnt初始化
-    pcnt_init(&right_motor);//右电机pcnt初始化
-    ledc_init(&left_motor);//左电机ledc初始化
-    ledc_init(&right_motor);//右电机ledc初始化
+    gpio_init(&chassis.left_motor,&bmi270);//GPIO初始化
+    gpio_init(&chassis.right_motor,&bmi270);//GPIO初始化
+    gpio_set_level(chassis.left_motor.in1_num,0);
+    gpio_set_level(chassis.left_motor.in2_num,0);
+    gpio_set_level(chassis.right_motor.in1_num,0);
+    gpio_set_level(chassis.right_motor.in2_num,0);
+    pcnt_init(&chassis.left_motor);//左电机pcnt初始化
+    pcnt_init(&chassis.right_motor);//右电机pcnt初始化
+    ledc_init(&chassis.left_motor);//左电机ledc初始化
+    ledc_init(&chassis.right_motor);//右电机ledc初始化
     xTaskCreate(motor_control_task,"motor control task",8192,NULL,10,NULL);//创建电机控制任务
 }
