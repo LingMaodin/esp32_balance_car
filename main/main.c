@@ -55,19 +55,19 @@ typedef struct{
 }balance_controller_t;
 
 typedef struct{
-    float xxxx_output
-}xxxx_controller_t;
+    float direction_output
+}direction_controller_t;
 
 typedef enum{
     STOP=0,
     FORWARD=1,
     BACKWARD=2,
-}direction_t;
+}rotation_t;
 
 typedef struct{
     uint32_t left_motor_duty;
     uint32_t right_motor_duty;
-    direction_t direction;
+    rotation_t rotation;
 }duty_t;
 
 typedef struct{
@@ -75,7 +75,7 @@ typedef struct{
     motor_hardware_t right_motor;
     speed_controller_t speed;
     balance_controller_t balance;
-    xxxx_controller_t xxxx;
+    direction_controller_t direction;
     duty_t output;
 }chassis_t;
 
@@ -139,7 +139,7 @@ static chassis_t chassis={
     .output={
         .left_motor_duty=0,
         .right_motor_duty=0,
-        .direction=STOP,
+        .rotation=STOP,
     },
 };
 static bmi270_t bmi270={
@@ -155,7 +155,7 @@ static bmi270_t bmi270={
     .gyro_dps=0,
 };
 
-static void IRAM_ATTR gpio_isr_edge_handler(void* arg)
+static void IRAM_ATTR gpio_isr_edge_handler(void* arg)//GPIO中断唤醒主任务
 {
     BaseType_t xHigherPriorityTaskWoken=pdFALSE;
     configASSERT(xTaskToNotify!=NULL);
@@ -164,7 +164,7 @@ static void IRAM_ATTR gpio_isr_edge_handler(void* arg)
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-esp_err_t bmi270_init(bmi270_t *sensor)
+esp_err_t bmi270_init(bmi270_t *sensor)//初始化bmi270
 {
     const i2c_config_t i2c_bus_conf = {
         .mode = I2C_MODE_MASTER,
@@ -190,7 +190,7 @@ esp_err_t bmi270_init(bmi270_t *sensor)
     return ESP_OK;
 }
 
-static int8_t set_accel_gyro_config(bmi270_t *sensor)
+static int8_t set_accel_gyro_config(bmi270_t *sensor)//设置加速度计 陀螺仪 中断配置
 {
     int8_t rslt;
     struct bmi2_sens_config config[2];
@@ -237,7 +237,7 @@ static int8_t set_accel_gyro_config(bmi270_t *sensor)
     return rslt;
 }
 
-static esp_err_t bmi270_enable(bmi270_t *sensor)
+static esp_err_t bmi270_enable(bmi270_t *sensor)//使能bmi270
 {
     int8_t rslt;
     uint8_t sens_list[2] = { BMI2_ACCEL, BMI2_GYRO };
@@ -260,7 +260,7 @@ static esp_err_t bmi270_enable(bmi270_t *sensor)
     return (rslt == BMI2_OK) ? ESP_OK : ESP_FAIL;
 }
 
-void interrupt_gpio_init(const bmi270_t *sensor)
+void interrupt_gpio_init(const bmi270_t *sensor)//初始化中断GPIO
 {
     gpio_config_t sensor_gpio_conf={
         .mode=GPIO_MODE_INPUT,//输入模式
@@ -327,7 +327,7 @@ void pcnt_init(motor_hardware_t *motor)//pcnt初始化
     return;
 }
 
-void ledc_init(motor_hardware_t *motor)
+void ledc_init(motor_hardware_t *motor)//ledc初始化
 {
     ledc_timer_config_t ledc_timer_cfg={
         .speed_mode=LEDC_LOW_SPEED_MODE,
@@ -349,7 +349,7 @@ void ledc_init(motor_hardware_t *motor)
     ledc_channel_config(&ledc_channel_cfg);
 }
 
-void read_pcnt(motor_hardware_t *motor, int *current_pulses)
+void read_pcnt(motor_hardware_t *motor, int *current_pulses)//读取pcnt计数值
 {
     esp_err_t ret = pcnt_unit_get_count(motor->pcnt_unit_hdl, current_pulses);
     if (ret != ESP_OK) {
@@ -359,7 +359,7 @@ void read_pcnt(motor_hardware_t *motor, int *current_pulses)
     pcnt_unit_clear_count(motor->pcnt_unit_hdl);
 }
 
-void read_bmi270(bmi270_t *sensor)
+void read_bmi270(bmi270_t *sensor)//读取bmi270传感器数据
 {
     int8_t rslt = bmi2_get_sensor_data(&sensor->sensor_data, sensor->bmi270_hdl);
     bmi2_error_codes_print_result(rslt);
@@ -369,7 +369,7 @@ void read_bmi270(bmi270_t *sensor)
     sensor->gyro_dps=sensor->sensor_data.gyr.y/131.072f;
 }
 
-void speed_controller(chassis_t *chassis,int average_pulses)
+void speed_controller(chassis_t *chassis,int average_pulses)//速度环控制器
 {
     chassis->speed.pulse_error = TARGET_PULSES_PER_PERIOD - average_pulses;
     chassis->speed.speed_output += chassis->speed.Kp * (chassis->speed.pulse_error - chassis->speed.last_pulse_error)
@@ -385,7 +385,7 @@ void speed_controller(chassis_t *chassis,int average_pulses)
     chassis->speed.last_pulse_error = chassis->speed.pulse_error;//更新上一次脉冲误差
 }
 
-void balance_controller(chassis_t *chassis)
+void balance_controller(chassis_t *chassis)//直立环控制器
 {
     chassis->balance.angle_error=chassis->balance.target_angle-chassis->balance.current_angle;
     chassis->balance.balance_output=chassis->balance.Kp*chassis->balance.angle_error
@@ -394,32 +394,32 @@ void balance_controller(chassis_t *chassis)
     chassis->balance.last_angle_error=chassis->balance.angle_error;
 }
 
-void xxxx_controller(chassis_t *chassis)
+void direction_controller(chassis_t *chassis)//转向环控制器
 {
 
 }
 
-void calculate_duty(chassis_t *chassis)
+void calculate_duty(chassis_t *chassis)//计算占空比并设置电机方向
 {
     if (chassis->balance.balance_output>0)
     {
-        chassis->output.direction=FORWARD;
-        chassis->output.left_motor_duty=(uint32_t)(chassis->balance.balance_output+chassis->xxxx.xxxx_output);
-        chassis->output.right_motor_duty=(uint32_t)(chassis->balance.balance_output-chassis->xxxx.xxxx_output);
+        chassis->output.rotation=FORWARD;
+        chassis->output.left_motor_duty=(uint32_t)(chassis->balance.balance_output+chassis->direction.direction_output);
+        chassis->output.right_motor_duty=(uint32_t)(chassis->balance.balance_output-chassis->direction.direction_output);
     }
     else if (chassis->balance.balance_output<0)
     {
-        chassis->output.direction=BACKWARD;
-        chassis->output.left_motor_duty=(uint32_t)fabsf(chassis->balance.balance_output+chassis->xxxx.xxxx_output);
-        chassis->output.right_motor_duty=(uint32_t)fabsf(chassis->balance.balance_output-chassis->xxxx.xxxx_output);
+        chassis->output.rotation=BACKWARD;
+        chassis->output.left_motor_duty=(uint32_t)fabsf(chassis->balance.balance_output+chassis->direction.direction_output);
+        chassis->output.right_motor_duty=(uint32_t)fabsf(chassis->balance.balance_output-chassis->direction.direction_output);
     }
     else
-        chassis->output.direction=STOP;
+        chassis->output.rotation=STOP;
 }
 
-void set_duty(chassis_t *chassis)
+void set_duty(chassis_t *chassis)//设置占空比
 {
-    switch (chassis->output.direction)
+    switch (chassis->output.rotation)
     {
     case STOP:
         gpio_set_level(chassis->left_motor.in1_num,0);
@@ -453,7 +453,7 @@ void set_duty(chassis_t *chassis)
     ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->right_motor.ledc_channel,chassis->output.right_motor_duty,0);
 }
 
-void motor_control_task(void *pvParameters)
+void motor_control_task(void *pvParameters)//电机控制主任务
 {
     uint32_t ulNotificationValue;
     const TickType_t xMaxBlockTime=pdMS_TO_TICKS(5);
