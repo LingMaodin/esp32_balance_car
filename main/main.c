@@ -45,6 +45,7 @@ typedef struct{
 typedef struct{
     float target_angle;
     float current_angle;
+    float last_angle;
     float angle_error;
     float last_angle_error;
     float Kp;
@@ -70,6 +71,8 @@ typedef struct{
     uint64_t bmi270_intr_num;
 
     struct bmi2_sens_data sensor_data;
+    float accel_angle;
+    float gyro_dps;
 }bmi270_t;
 
 static volatile TaskHandle_t xTaskToNotify=NULL;//任务通知代替二进制信号量唤醒任务
@@ -107,6 +110,7 @@ static chassis_t chassis={
     .balance={
         .target_angle=0,
         .current_angle=0,
+        .last_angle=0,
         .angle_error=0,
         .last_angle_error=0,
         .Kp=0,
@@ -123,6 +127,8 @@ static bmi270_t bmi270={
     .bmi270_hdl=NULL,
     .bmi270_intr_num=GPIO_NUM_6,
     .sensor_data={},
+    .accel_angle=0,
+    .gyro_dps=0,
 };
 
 static void IRAM_ATTR gpio_isr_edge_handler(void* arg)
@@ -333,6 +339,13 @@ void read_bmi270(bmi270_t *sensor)
 {
     int8_t rslt = bmi2_get_sensor_data(&sensor->sensor_data, sensor->bmi270_hdl);
     bmi2_error_codes_print_result(rslt);
+    /*
+    未来使用卡尔曼滤波
+    */
+    float acc_g_x=sensor->sensor_data.acc.x/8192.0f;
+    float acc_g_z=sensor->sensor_data.acc.z/8192.0f;
+    sensor->accel_angle=arctan(acc_g_x/acc_g_z);
+    sensor->gyro_dps=sensor->sensor_data.gyr.y/131.072f;
 }
 
 void speed_controller(chassis_t *chassis,int average_pulses)
@@ -351,6 +364,20 @@ void speed_controller(chassis_t *chassis,int average_pulses)
     chassis->speed.last_pulse_error = chassis->speed.pulse_error;//更新上一次脉冲误差
 }
 
+void balance_controller(chassis_t *chassis)
+{
+    chassis->balance.angle_error=chassis->balance.target_angle-chassis->balance.current_angle;
+    chassis->balance.duty=chassis->balance.Kp*chassis->balance.angle_error
+                        +chassis->balance.Kd*(chassis->balance.angle_error-chassis->balance.last_angle_error);
+    if (chassis->balance.duty > 100)
+        chassis->balance.duty = 100;
+    else if (chassis->balance.duty < 0)
+        chassis->balance.duty = 0;
+    ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->left_motor.ledc_channel,chassis->balance.duty,0);
+    ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->right_motor.ledc_channel,chassis->balance.duty,0);
+    chassis->balance.last_angle_error=chassis->balance.angle_error;
+}
+
 void motor_control_task(void *pvParameters)
 {
     uint32_t ulNotificationValue;
@@ -366,7 +393,7 @@ void motor_control_task(void *pvParameters)
         ulNotificationValue = ulTaskNotifyTake(pdTRUE,xMaxBlockTime);
         if(ulNotificationValue==1)
         {
-            if(times>=5)//有问题,第一次无法进行
+            if(times>=4)//上电时，前4次速度环开环
             {
                 //外环速度环
                 read_pcnt(&chassis.left_motor, &left_pulses);
@@ -375,8 +402,12 @@ void motor_control_task(void *pvParameters)
                 speed_controller(&chassis,pulse_average);
                 times=0;
             }
+            times++;
             //内环直立环
             read_bmi270(&bmi270); 
+            chassis.balance.current_angle=0.95*(chassis.balance.last_angle+bmi270.gyro_dps*0.005)+0.05*bmi270.accel_angle;//一阶互补滤波
+            chassis.balance.last_angle=chassis.balance.current_angle;
+            balance_controller(&chassis);
         }
         else
             ESP_LOGW(TAG,"Main task timeout");
