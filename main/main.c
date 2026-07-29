@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -39,7 +40,7 @@ typedef struct{
     float last_pulse_error;
     float Kp;
     float Ki;
-    float target_angle_raw;
+    float speed_output;
 }speed_controller_t;
 
 typedef struct{
@@ -50,14 +51,32 @@ typedef struct{
     float last_angle_error;
     float Kp;
     float Kd;
-    float duty;
+    float balance_output;
 }balance_controller_t;
+
+typedef struct{
+    float xxxx_output
+}xxxx_controller_t;
+
+typedef enum{
+    STOP=0,
+    FORWARD=1,
+    BACKWARD=2,
+}direction_t;
+
+typedef struct{
+    uint32_t left_motor_duty;
+    uint32_t right_motor_duty;
+    direction_t direction;
+}duty_t;
 
 typedef struct{
     motor_hardware_t left_motor;
     motor_hardware_t right_motor;
     speed_controller_t speed;
     balance_controller_t balance;
+    xxxx_controller_t xxxx;
+    duty_t output;
 }chassis_t;
 
 typedef struct{
@@ -105,7 +124,7 @@ static chassis_t chassis={
         .last_pulse_error=0,
         .Kp=2.0,
         .Ki=0.02,
-        .target_angle_raw=0,
+        .speed_output=0,
     },
     .balance={
         .target_angle=0,
@@ -115,7 +134,12 @@ static chassis_t chassis={
         .last_angle_error=0,
         .Kp=0,
         .Kd=0,
-        .duty=0,
+        .balance_output=0,
+    },
+    .output={
+        .left_motor_duty=0,
+        .right_motor_duty=0,
+        .direction=STOP,
     },
 };
 static bmi270_t bmi270={
@@ -339,27 +363,24 @@ void read_bmi270(bmi270_t *sensor)
 {
     int8_t rslt = bmi2_get_sensor_data(&sensor->sensor_data, sensor->bmi270_hdl);
     bmi2_error_codes_print_result(rslt);
-    /*
-    未来使用卡尔曼滤波
-    */
     float acc_g_x=sensor->sensor_data.acc.x/8192.0f;
     float acc_g_z=sensor->sensor_data.acc.z/8192.0f;
-    sensor->accel_angle=arctan(acc_g_x/acc_g_z);
+    sensor->accel_angle=atan2f(-acc_g_x,acc_g_z)*(180.0f/M_PI);
     sensor->gyro_dps=sensor->sensor_data.gyr.y/131.072f;
 }
 
 void speed_controller(chassis_t *chassis,int average_pulses)
 {
     chassis->speed.pulse_error = TARGET_PULSES_PER_PERIOD - average_pulses;
-    chassis->speed.target_angle_raw += chassis->speed.Kp * (chassis->speed.pulse_error - chassis->speed.last_pulse_error)
+    chassis->speed.speed_output += chassis->speed.Kp * (chassis->speed.pulse_error - chassis->speed.last_pulse_error)
                                    + chassis->speed.Ki * chassis->speed.pulse_error;
     //限制目标角度在[-10,10]范围内
-    if (chassis->speed.target_angle_raw > 10) 
-        chassis->speed.target_angle_raw = 10;
-    else if (chassis->speed.target_angle_raw < -10) 
-        chassis->speed.target_angle_raw = -10;
+    if (chassis->speed.speed_output > 10) 
+        chassis->speed.speed_output = 10;
+    else if (chassis->speed.speed_output < -10) 
+        chassis->speed.speed_output = -10;
 
-    chassis->balance.target_angle = chassis->speed.target_angle_raw;//将目标角度传递给平衡环
+    chassis->balance.target_angle = chassis->speed.speed_output;//将目标角度传递给平衡环
 
     chassis->speed.last_pulse_error = chassis->speed.pulse_error;//更新上一次脉冲误差
 }
@@ -367,15 +388,69 @@ void speed_controller(chassis_t *chassis,int average_pulses)
 void balance_controller(chassis_t *chassis)
 {
     chassis->balance.angle_error=chassis->balance.target_angle-chassis->balance.current_angle;
-    chassis->balance.duty=chassis->balance.Kp*chassis->balance.angle_error
+    chassis->balance.balance_output=chassis->balance.Kp*chassis->balance.angle_error
                         +chassis->balance.Kd*(chassis->balance.angle_error-chassis->balance.last_angle_error);
-    if (chassis->balance.duty > 100)
-        chassis->balance.duty = 100;
-    else if (chassis->balance.duty < 0)
-        chassis->balance.duty = 0;
-    ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->left_motor.ledc_channel,chassis->balance.duty,0);
-    ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->right_motor.ledc_channel,chassis->balance.duty,0);
+
     chassis->balance.last_angle_error=chassis->balance.angle_error;
+}
+
+void xxxx_controller(chassis_t *chassis)
+{
+
+}
+
+void calculate_duty(chassis_t *chassis)
+{
+    if (chassis->balance.balance_output>0)
+    {
+        chassis->output.direction=FORWARD;
+        chassis->output.left_motor_duty=(uint32_t)(chassis->balance.balance_output+chassis->xxxx.xxxx_output);
+        chassis->output.right_motor_duty=(uint32_t)(chassis->balance.balance_output-chassis->xxxx.xxxx_output);
+    }
+    else if (chassis->balance.balance_output<0)
+    {
+        chassis->output.direction=BACKWARD;
+        chassis->output.left_motor_duty=(uint32_t)fabsf(chassis->balance.balance_output+chassis->xxxx.xxxx_output);
+        chassis->output.right_motor_duty=(uint32_t)fabsf(chassis->balance.balance_output-chassis->xxxx.xxxx_output);
+    }
+    else
+        chassis->output.direction=STOP;
+}
+
+void set_duty(chassis_t *chassis)
+{
+    switch (chassis->output.direction)
+    {
+    case STOP:
+        gpio_set_level(chassis->left_motor.in1_num,0);
+        gpio_set_level(chassis->left_motor.in2_num,0);
+        gpio_set_level(chassis->right_motor.in1_num,0);
+        gpio_set_level(chassis->right_motor.in2_num,0);
+        chassis->output.left_motor_duty=0;
+        chassis->output.right_motor_duty=0;
+        break;
+    case FORWARD:
+        gpio_set_level(chassis->left_motor.in1_num,1);
+        gpio_set_level(chassis->left_motor.in2_num,0);
+        gpio_set_level(chassis->right_motor.in1_num,1);
+        gpio_set_level(chassis->right_motor.in2_num,0);
+        break;
+    case BACKWARD:
+        gpio_set_level(chassis->left_motor.in1_num,0);
+        gpio_set_level(chassis->left_motor.in2_num,1);
+        gpio_set_level(chassis->right_motor.in1_num,0);
+        gpio_set_level(chassis->right_motor.in2_num,1);
+        break;
+    default:
+        break;
+    }
+    if (chassis->output.left_motor_duty>BASE_PWM_DUTY)
+        chassis->output.left_motor_duty=BASE_PWM_DUTY;
+    if (chassis->output.right_motor_duty>BASE_PWM_DUTY)
+        chassis->output.right_motor_duty=BASE_PWM_DUTY;
+    
+    ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->left_motor.ledc_channel,chassis->output.left_motor_duty,0);
+    ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->right_motor.ledc_channel,chassis->output.right_motor_duty,0);
 }
 
 void motor_control_task(void *pvParameters)
@@ -393,7 +468,7 @@ void motor_control_task(void *pvParameters)
         ulNotificationValue = ulTaskNotifyTake(pdTRUE,xMaxBlockTime);
         if(ulNotificationValue==1)
         {
-            if(times>=4)//上电时，前4次速度环开环
+            if(times>=4)//上电后前4次速度环开环
             {
                 //外环速度环
                 read_pcnt(&chassis.left_motor, &left_pulses);
@@ -408,6 +483,12 @@ void motor_control_task(void *pvParameters)
             chassis.balance.current_angle=0.95*(chassis.balance.last_angle+bmi270.gyro_dps*0.005)+0.05*bmi270.accel_angle;//一阶互补滤波
             chassis.balance.last_angle=chassis.balance.current_angle;
             balance_controller(&chassis);
+            //转向环
+
+            //计算占空比
+            calculate_duty(&chassis);
+            //设置占空比
+            set_duty(&chassis);
         }
         else
             ESP_LOGW(TAG,"Main task timeout");
