@@ -39,7 +39,7 @@ typedef struct{
     float last_pulse_error;
     float Kp;
     float Ki;
-    double speed_output;
+    float target_angle_raw;
 }speed_controller_t;
 
 typedef struct{
@@ -49,7 +49,7 @@ typedef struct{
     float last_angle_error;
     float Kp;
     float Kd;
-    double duty;
+    float duty;
 }balance_controller_t;
 
 typedef struct{
@@ -102,7 +102,7 @@ static chassis_t chassis={
         .last_pulse_error=0,
         .Kp=2.0,
         .Ki=0.02,
-        .speed_output=0,
+        .target_angle_raw=0,
     },
     .balance={
         .target_angle=0,
@@ -127,7 +127,6 @@ static bmi270_t bmi270={
 
 static void IRAM_ATTR gpio_isr_edge_handler(void* arg)
 {
-    uint32_t gpio_num = (uint32_t) arg;
     BaseType_t xHigherPriorityTaskWoken=pdFALSE;
     configASSERT(xTaskToNotify!=NULL);
     vTaskNotifyGiveFromISR(xTaskToNotify,&xHigherPriorityTaskWoken);
@@ -231,24 +230,26 @@ static esp_err_t bmi270_enable(bmi270_t *sensor)
     return (rslt == BMI2_OK) ? ESP_OK : ESP_FAIL;
 }
 
-void gpio_init(const motor_hardware_t *motor,const bmi270_t *sensor)//GPIO初始化
+void interrupt_gpio_init(const bmi270_t *sensor)
 {
-    gpio_config_t motor_gpio_conf={
-        .mode=GPIO_MODE_OUTPUT,//输出模式
-        .pin_bit_mask=(1ULL<<motor->in1_num)|(1ULL<<motor->in2_num),//配置in1_num、in2_num为输出
-    };
     gpio_config_t sensor_gpio_conf={
         .mode=GPIO_MODE_INPUT,//输入模式
         .pin_bit_mask=(1ULL<<sensor->bmi270_intr_num),
         .pull_down_en=GPIO_PULLDOWN_ENABLE,
         .intr_type=GPIO_INTR_ANYEDGE,//双边沿触发
     };
-
-    ESP_ERROR_CHECK(gpio_config(&motor_gpio_conf));//配置GPIO并判断是否成功
     ESP_ERROR_CHECK(gpio_config(&sensor_gpio_conf));//配置GPIO并判断是否成功
     gpio_install_isr_service(0);
-    gpio_isr_handler_add(sensor->bmi270_intr_num, gpio_isr_edge_handler, (void*)(sensor->bmi270_intr_num));
-    return;
+    gpio_isr_handler_add(sensor->bmi270_intr_num, gpio_isr_edge_handler,NULL);    
+}
+
+void gpio_init(const motor_hardware_t *motor)//GPIO初始化
+{
+    gpio_config_t motor_gpio_conf={
+        .mode=GPIO_MODE_OUTPUT,//输出模式
+        .pin_bit_mask=(1ULL<<motor->in1_num)|(1ULL<<motor->in2_num),//配置in1_num、in2_num为输出
+    };
+    ESP_ERROR_CHECK(gpio_config(&motor_gpio_conf));//配置GPIO并判断是否成功
 }
 
 void pcnt_init(motor_hardware_t *motor)//pcnt初始化
@@ -334,19 +335,30 @@ void read_bmi270(bmi270_t *sensor)
     bmi2_error_codes_print_result(rslt);
 }
 
-void speed_control(chassis_t *chassis,int average_pulses)
+void speed_controller(chassis_t *chassis,int average_pulses)
 {
     chassis->speed.pulse_error = TARGET_PULSES_PER_PERIOD - average_pulses;
-    chassis->speed.speed_output += chassis->speed.Kp * (chassis->speed.pulse_error - chassis->speed.last_pulse_error)
+    chassis->speed.target_angle_raw += chassis->speed.Kp * (chassis->speed.pulse_error - chassis->speed.last_pulse_error)
                                    + chassis->speed.Ki * chassis->speed.pulse_error;
-    chassis->speed.last_pulse_error = chassis->speed.pulse_error;
+    //限制目标角度在[-10,10]范围内
+    if (chassis->speed.target_angle_raw > 10) 
+        chassis->speed.target_angle_raw = 10;
+    else if (chassis->speed.target_angle_raw < -10) 
+        chassis->speed.target_angle_raw = -10;
+
+    chassis->balance.target_angle = chassis->speed.target_angle_raw;//将目标角度传递给平衡环
+
+    chassis->speed.last_pulse_error = chassis->speed.pulse_error;//更新上一次脉冲误差
 }
 
 void motor_control_task(void *pvParameters)
 {
     uint32_t ulNotificationValue;
     const TickType_t xMaxBlockTime=pdMS_TO_TICKS(5);
+    int left_pulses=0;
+    int right_pulses=0;
     int pulse_average=0;
+    int times=0;
     while(1)
     {
         configASSERT(xTaskToNotify==NULL);
@@ -354,16 +366,17 @@ void motor_control_task(void *pvParameters)
         ulNotificationValue = ulTaskNotifyTake(pdTRUE,xMaxBlockTime);
         if(ulNotificationValue==1)
         {
-            //外环速度环
-            int left_pulses = 0;
-            int right_pulses = 0;
-            read_pcnt(&chassis.left_motor, &left_pulses);
-            read_pcnt(&chassis.right_motor, &right_pulses);
-            pulse_average=(left_pulses+right_pulses)/2;
-            speed_control(&chassis,pulse_average);
+            if(times>=5)//有问题,第一次无法进行
+            {
+                //外环速度环
+                read_pcnt(&chassis.left_motor, &left_pulses);
+                read_pcnt(&chassis.right_motor, &right_pulses);
+                pulse_average=(left_pulses+right_pulses)/2;
+                speed_controller(&chassis,pulse_average);
+                times=0;
+            }
             //内环直立环
-            read_bmi270(&bmi270);
-            
+            read_bmi270(&bmi270); 
         }
         else
             ESP_LOGW(TAG,"Main task timeout");
@@ -372,10 +385,11 @@ void motor_control_task(void *pvParameters)
 
 void app_main(void)
 {
+    interrupt_gpio_init(&bmi270);//中断GPIO初始化
     ESP_ERROR_CHECK(bmi270_init(&bmi270));//BMI270初始化
     ESP_ERROR_CHECK(bmi270_enable(&bmi270));//BMI270使能
-    gpio_init(&chassis.left_motor,&bmi270);//GPIO初始化
-    gpio_init(&chassis.right_motor,&bmi270);//GPIO初始化
+    gpio_init(&chassis.left_motor);//GPIO初始化
+    gpio_init(&chassis.right_motor);//GPIO初始化
     gpio_set_level(chassis.left_motor.in1_num,0);
     gpio_set_level(chassis.left_motor.in2_num,0);
     gpio_set_level(chassis.right_motor.in1_num,0);
