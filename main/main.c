@@ -55,6 +55,13 @@ typedef struct{
 }balance_controller_t;
 
 typedef struct{
+    float target_angle;
+    float current_angle;
+    float last_angle;
+    float angle_error;
+    float last_angle_error;
+    float Kp;
+    float Kd;
     float direction_output
 }direction_controller_t;
 
@@ -91,7 +98,8 @@ typedef struct{
 
     struct bmi2_sens_data sensor_data;
     float accel_angle;
-    float gyro_dps;
+    float gyro_dps_y;
+    float gyro_dps_z;
 }bmi270_t;
 
 static volatile TaskHandle_t xTaskToNotify=NULL;//任务通知代替二进制信号量唤醒任务
@@ -122,8 +130,8 @@ static chassis_t chassis={
         .current_pulses=0,
         .pulse_error=0,
         .last_pulse_error=0,
-        .Kp=2.0,
-        .Ki=0.02,
+        .Kp=0,
+        .Ki=0,
         .speed_output=0,
     },
     .balance={
@@ -135,6 +143,16 @@ static chassis_t chassis={
         .Kp=0,
         .Kd=0,
         .balance_output=0,
+    },
+    .direction={
+        .target_angle=0,
+        .current_angle=0,
+        .last_angle=0,
+        .angle_error=0,
+        .last_angle_error=0,
+        .Kp=0,
+        .Kd=0,
+        .direction_output=0,
     },
     .output={
         .left_motor_duty=0,
@@ -152,7 +170,8 @@ static bmi270_t bmi270={
     .bmi270_intr_num=GPIO_NUM_6,
     .sensor_data={},
     .accel_angle=0,
-    .gyro_dps=0,
+    .gyro_dps_y=0,
+    .gyro_dps_z=0,
 };
 
 static void IRAM_ATTR gpio_isr_edge_handler(void* arg)//GPIO中断唤醒主任务
@@ -364,9 +383,11 @@ void read_bmi270(bmi270_t *sensor)//读取bmi270传感器数据
     int8_t rslt = bmi2_get_sensor_data(&sensor->sensor_data, sensor->bmi270_hdl);
     bmi2_error_codes_print_result(rslt);
     float acc_g_x=sensor->sensor_data.acc.x/8192.0f;
+    float acc_g_y=sensor->sensor_data.acc.y/8192.0f;
     float acc_g_z=sensor->sensor_data.acc.z/8192.0f;
     sensor->accel_angle=atan2f(-acc_g_x,acc_g_z)*(180.0f/M_PI);
-    sensor->gyro_dps=sensor->sensor_data.gyr.y/131.072f;
+    sensor->gyro_dps_y=sensor->sensor_data.gyr.y/131.072f;
+    sensor->gyro_dps_z=sensor->sensor_data.gyr.z/131.072f;
 }
 
 void speed_controller(chassis_t *chassis,int average_pulses)//速度环控制器
@@ -396,7 +417,11 @@ void balance_controller(chassis_t *chassis)//直立环控制器
 
 void direction_controller(chassis_t *chassis)//转向环控制器
 {
+    chassis->direction.angle_error=chassis->direction.target_angle-chassis->direction.current_angle;
+    chassis->direction.direction_output=chassis->direction.Kp*chassis->direction.angle_error
+                        +chassis->direction.Kd*(chassis->direction.angle_error-chassis->direction.last_angle_error);
 
+    chassis->direction.last_angle_error=chassis->direction.angle_error;
 }
 
 void calculate_duty(chassis_t *chassis)//计算占空比并设置电机方向
@@ -480,11 +505,13 @@ void motor_control_task(void *pvParameters)//电机控制主任务
             times++;
             //内环直立环
             read_bmi270(&bmi270); 
-            chassis.balance.current_angle=0.95*(chassis.balance.last_angle+bmi270.gyro_dps*0.005)+0.05*bmi270.accel_angle;//一阶互补滤波
+            chassis.balance.current_angle=0.95*(chassis.balance.last_angle+bmi270.gyro_dps_y*0.005)+0.05*bmi270.accel_angle;//一阶互补滤波
             chassis.balance.last_angle=chassis.balance.current_angle;
             balance_controller(&chassis);
             //转向环
-
+            chassis.direction.current_angle=chassis.direction.last_angle+bmi270.gyro_dps_z*0.005;
+            chassis.direction.last_angle=chassis.direction.current_angle;
+            direction_controller(&chassis);
             //计算占空比
             calculate_duty(&chassis);
             //设置占空比
