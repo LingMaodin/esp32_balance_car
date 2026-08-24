@@ -18,8 +18,17 @@
 #define MOTOR_VOLTAGE 7.4//额定电压
 #define BUTTRY_VOLTAGE 12.0//电池电压
 #define DUTY_RESOLUTION ((1<<10)-1)//占空比分辨率
-#define BASE_PWM_DUTY (MOTOR_VOLTAGE/BUTTRY_VOLTAGE*(float)DUTY_RESOLUTION)//基础占空比
+#define PWM_DUTY_MAX (MOTOR_VOLTAGE/BUTTRY_VOLTAGE*(float)DUTY_RESOLUTION)//占空比上限(额定电压限制)
 #define TARGET_PULSES_PER_PERIOD 0//目标每周期脉冲数
+
+//PID参数,调参时直接修改这里
+#define BALANCE_KP 0.0f//直立环比例
+#define BALANCE_KD 0.0f//直立环微分
+#define SPEED_KP 0.0f//速度环比例
+#define SPEED_KI 0.0f//速度环积分
+#define DIRECTION_KP 0.0f//转向环比例
+#define DIRECTION_KD 0.0f//转向环微分
+#define DUTY_DEADBAND 1.0f//占空比死区:低于此值判STOP停机,消除浮点零抖动,根据实际最小启动占空比调节
 
 typedef struct{
     gpio_num_t pcnt_s1_num;
@@ -35,7 +44,6 @@ typedef struct{
 }motor_hardware_t;
 
 typedef struct{
-    int current_pulses;
     float pulse_error;
     float last_pulse_error;
     float Kp;
@@ -62,7 +70,7 @@ typedef struct{
     float last_angle_error;
     float Kp;
     float Kd;
-    float direction_output
+    float direction_output;
 }direction_controller_t;
 
 typedef enum{
@@ -74,7 +82,8 @@ typedef enum{
 typedef struct{
     uint32_t left_motor_duty;
     uint32_t right_motor_duty;
-    rotation_t rotation;
+    rotation_t left_rotation;
+    rotation_t right_rotation;
 }duty_t;
 
 typedef struct{
@@ -127,11 +136,10 @@ static chassis_t chassis={
             .in2_num=GPIO_NUM_42,
         },
     .speed={
-        .current_pulses=0,
         .pulse_error=0,
         .last_pulse_error=0,
-        .Kp=0,
-        .Ki=0,
+        .Kp=SPEED_KP,
+        .Ki=SPEED_KI,
         .speed_output=0,
     },
     .balance={
@@ -140,8 +148,8 @@ static chassis_t chassis={
         .last_angle=0,
         .angle_error=0,
         .last_angle_error=0,
-        .Kp=0,
-        .Kd=0,
+        .Kp=BALANCE_KP,
+        .Kd=BALANCE_KD,
         .balance_output=0,
     },
     .direction={
@@ -150,14 +158,15 @@ static chassis_t chassis={
         .last_angle=0,
         .angle_error=0,
         .last_angle_error=0,
-        .Kp=0,
-        .Kd=0,
+        .Kp=DIRECTION_KP,
+        .Kd=DIRECTION_KD,
         .direction_output=0,
     },
     .output={
         .left_motor_duty=0,
         .right_motor_duty=0,
-        .rotation=STOP,
+        .left_rotation=STOP,
+        .right_rotation=STOP,
     },
 };
 static bmi270_t bmi270={
@@ -177,10 +186,13 @@ static bmi270_t bmi270={
 static void IRAM_ATTR gpio_isr_edge_handler(void* arg)//GPIO中断唤醒主任务
 {
     BaseType_t xHigherPriorityTaskWoken=pdFALSE;
-    configASSERT(xTaskToNotify!=NULL);
-    vTaskNotifyGiveFromISR(xTaskToNotify,&xHigherPriorityTaskWoken);
-    xTaskToNotify=NULL;
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    //句柄固定指向主任务,不再置空,避免处理期间中断到来时断言失败
+    //仅在任务赋值前可能为NULL,加判断防止空指针通知
+    if (xTaskToNotify!=NULL)
+    {
+        vTaskNotifyGiveFromISR(xTaskToNotify,&xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
 }
 
 esp_err_t bmi270_init(bmi270_t *sensor)//初始化bmi270
@@ -244,7 +256,7 @@ static int8_t set_accel_gyro_config(bmi270_t *sensor)//设置加速度计 陀螺
         pin_config.pin_cfg[0].lvl = BMI2_INT_ACTIVE_LOW;
         pin_config.pin_cfg[0].od = BMI2_INT_PUSH_PULL;
         pin_config.pin_cfg[0].output_en = BMI2_INT_OUTPUT_ENABLE;
-        pin_config.int_latch = BMI2_INT_LATCH;
+        pin_config.int_latch = BMI2_INT_NON_LATCH;
 
         rslt = bmi2_set_int_pin_config(&pin_config, sensor->bmi270_hdl);
         bmi2_error_codes_print_result(rslt);
@@ -269,7 +281,7 @@ static esp_err_t bmi270_enable(bmi270_t *sensor)//使能bmi270
     rslt = set_accel_gyro_config(sensor);
     bmi2_error_codes_print_result(rslt);
 
-    rslt=bmi2_map_feat_int(BMI2_ANY_MOTION, BMI2_INT1, sensor->bmi270_hdl);
+    rslt=bmi2_map_data_int(BMI2_DRDY_INT, BMI2_INT1, sensor->bmi270_hdl);
     bmi2_error_codes_print_result(rslt);
 
     // Enable sensors
@@ -285,7 +297,7 @@ void interrupt_gpio_init(const bmi270_t *sensor)//初始化中断GPIO
         .mode=GPIO_MODE_INPUT,//输入模式
         .pin_bit_mask=(1ULL<<sensor->bmi270_intr_num),
         .pull_down_en=GPIO_PULLDOWN_ENABLE,
-        .intr_type=GPIO_INTR_ANYEDGE,//双边沿触发
+        .intr_type=GPIO_INTR_NEGEDGE,//下降沿触发
     };
     ESP_ERROR_CHECK(gpio_config(&sensor_gpio_conf));//配置GPIO并判断是否成功
     gpio_install_isr_service(0);
@@ -383,7 +395,6 @@ void read_bmi270(bmi270_t *sensor)//读取bmi270传感器数据
     int8_t rslt = bmi2_get_sensor_data(&sensor->sensor_data, sensor->bmi270_hdl);
     bmi2_error_codes_print_result(rslt);
     float acc_g_x=sensor->sensor_data.acc.x/8192.0f;
-    float acc_g_y=sensor->sensor_data.acc.y/8192.0f;
     float acc_g_z=sensor->sensor_data.acc.z/8192.0f;
     sensor->accel_angle=atan2f(-acc_g_x,acc_g_z)*(180.0f/M_PI);
     sensor->gyro_dps_y=sensor->sensor_data.gyr.y/131.072f;
@@ -426,54 +437,59 @@ void direction_controller(chassis_t *chassis)//转向环控制器
 
 void calculate_duty(chassis_t *chassis)//计算占空比并设置电机方向
 {
-    if (chassis->balance.balance_output>0)
+    //带符号计算左右占空比,转向环做差速(转向环停用时direction_output恒为0)
+    float left_duty=chassis->balance.balance_output+chassis->direction.direction_output;
+    float right_duty=chassis->balance.balance_output-chassis->direction.direction_output;
+
+    //死区:输出小于阈值视为平衡点停机,避免浮点零导致STOP不可达、方向正反抖动
+    if (fabsf(left_duty)<DUTY_DEADBAND)
+        left_duty=0.0f;
+    if (fabsf(right_duty)<DUTY_DEADBAND)
+        right_duty=0.0f;
+
+    //每侧独立判定方向,差速时可一侧正转一侧反转
+    //NaN时两个比较都为假,落STOP停机,由set_duty清零占空比兜底
+    chassis->output.left_rotation=(left_duty>0)?FORWARD:((left_duty<0)?BACKWARD:STOP);
+    chassis->output.right_rotation=(right_duty>0)?FORWARD:((right_duty<0)?BACKWARD:STOP);
+
+    //取绝对值并限幅,防止负值转uint32_t产生巨大数
+    left_duty=fabsf(left_duty);
+    right_duty=fabsf(right_duty);
+    if (left_duty>PWM_DUTY_MAX)
+        left_duty=PWM_DUTY_MAX;
+    if (right_duty>PWM_DUTY_MAX)
+        right_duty=PWM_DUTY_MAX;
+
+    chassis->output.left_motor_duty=(uint32_t)left_duty;
+    chassis->output.right_motor_duty=(uint32_t)right_duty;
+}
+
+static void set_motor_direction(const motor_hardware_t *motor, rotation_t rotation, uint32_t *motor_duty)//设置单电机方向
+{
+    switch (rotation)
     {
-        chassis->output.rotation=FORWARD;
-        chassis->output.left_motor_duty=(uint32_t)(chassis->balance.balance_output+chassis->direction.direction_output);
-        chassis->output.right_motor_duty=(uint32_t)(chassis->balance.balance_output-chassis->direction.direction_output);
+    case FORWARD:
+        gpio_set_level(motor->in1_num,1);
+        gpio_set_level(motor->in2_num,0);
+        break;
+    case BACKWARD:
+        gpio_set_level(motor->in1_num,0);
+        gpio_set_level(motor->in2_num,1);
+        break;
+    case STOP:
+    default:
+        gpio_set_level(motor->in1_num,0);
+        gpio_set_level(motor->in2_num,0);
+        *motor_duty=0;//停机清零占空比,防NaN等异常值
+        break;
     }
-    else if (chassis->balance.balance_output<0)
-    {
-        chassis->output.rotation=BACKWARD;
-        chassis->output.left_motor_duty=(uint32_t)fabsf(chassis->balance.balance_output+chassis->direction.direction_output);
-        chassis->output.right_motor_duty=(uint32_t)fabsf(chassis->balance.balance_output-chassis->direction.direction_output);
-    }
-    else
-        chassis->output.rotation=STOP;
 }
 
 void set_duty(chassis_t *chassis)//设置占空比
 {
-    switch (chassis->output.rotation)
-    {
-    case STOP:
-        gpio_set_level(chassis->left_motor.in1_num,0);
-        gpio_set_level(chassis->left_motor.in2_num,0);
-        gpio_set_level(chassis->right_motor.in1_num,0);
-        gpio_set_level(chassis->right_motor.in2_num,0);
-        chassis->output.left_motor_duty=0;
-        chassis->output.right_motor_duty=0;
-        break;
-    case FORWARD:
-        gpio_set_level(chassis->left_motor.in1_num,1);
-        gpio_set_level(chassis->left_motor.in2_num,0);
-        gpio_set_level(chassis->right_motor.in1_num,1);
-        gpio_set_level(chassis->right_motor.in2_num,0);
-        break;
-    case BACKWARD:
-        gpio_set_level(chassis->left_motor.in1_num,0);
-        gpio_set_level(chassis->left_motor.in2_num,1);
-        gpio_set_level(chassis->right_motor.in1_num,0);
-        gpio_set_level(chassis->right_motor.in2_num,1);
-        break;
-    default:
-        break;
-    }
-    if (chassis->output.left_motor_duty>BASE_PWM_DUTY)
-        chassis->output.left_motor_duty=BASE_PWM_DUTY;
-    if (chassis->output.right_motor_duty>BASE_PWM_DUTY)
-        chassis->output.right_motor_duty=BASE_PWM_DUTY;
-    
+    set_motor_direction(&chassis->left_motor, chassis->output.left_rotation, &chassis->output.left_motor_duty);
+    set_motor_direction(&chassis->right_motor, chassis->output.right_rotation, &chassis->output.right_motor_duty);
+
     ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->left_motor.ledc_channel,chassis->output.left_motor_duty,0);
     ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,chassis->right_motor.ledc_channel,chassis->output.right_motor_duty,0);
 }
@@ -486,10 +502,9 @@ void motor_control_task(void *pvParameters)//电机控制主任务
     int right_pulses=0;
     int pulse_average=0;
     int times=0;
+    xTaskToNotify=xTaskGetCurrentTaskHandle();//固定通知句柄,与ISR中的空指针判断配合,消除竞态
     while(1)
     {
-        configASSERT(xTaskToNotify==NULL);
-        xTaskToNotify=xTaskGetCurrentTaskHandle();
         ulNotificationValue = ulTaskNotifyTake(pdTRUE,xMaxBlockTime);
         if(ulNotificationValue==1)
         {
@@ -508,9 +523,9 @@ void motor_control_task(void *pvParameters)//电机控制主任务
             chassis.balance.current_angle=0.95*(chassis.balance.last_angle+bmi270.gyro_dps_y*0.005)+0.05*bmi270.accel_angle;//一阶互补滤波
             chassis.balance.last_angle=chassis.balance.current_angle;
             balance_controller(&chassis);
-            //转向环
-            chassis.direction.current_angle=chassis.direction.last_angle+bmi270.gyro_dps_z*0.005;
-            chassis.direction.last_angle=chassis.direction.current_angle;
+            //转向环(停用,恢复遥控时取消下面两行积分的注释)
+            //chassis.direction.current_angle=chassis.direction.last_angle+bmi270.gyro_dps_z*0.005;
+            //chassis.direction.last_angle=chassis.direction.current_angle;
             direction_controller(&chassis);
             //计算占空比
             calculate_duty(&chassis);
@@ -524,9 +539,7 @@ void motor_control_task(void *pvParameters)//电机控制主任务
 
 void app_main(void)
 {
-    interrupt_gpio_init(&bmi270);//中断GPIO初始化
     ESP_ERROR_CHECK(bmi270_init(&bmi270));//BMI270初始化
-    ESP_ERROR_CHECK(bmi270_enable(&bmi270));//BMI270使能
     gpio_init(&chassis.left_motor);//GPIO初始化
     gpio_init(&chassis.right_motor);//GPIO初始化
     gpio_set_level(chassis.left_motor.in1_num,0);
@@ -538,4 +551,6 @@ void app_main(void)
     ledc_init(&chassis.left_motor);//左电机ledc初始化
     ledc_init(&chassis.right_motor);//右电机ledc初始化
     xTaskCreate(motor_control_task,"motor control task",8192,NULL,10,NULL);//创建电机控制任务
+    interrupt_gpio_init(&bmi270);//中断GPIO初始化
+    ESP_ERROR_CHECK(bmi270_enable(&bmi270));//BMI270使能
 }

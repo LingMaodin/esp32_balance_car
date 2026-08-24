@@ -1,6 +1,6 @@
 dependencies:
   espressif/bmi270_sensor:
-    component_hash: fac23a5ecd2effdac0fb0705988d853745b8ffb99a384f87a307b3b25d15d432
+    component_hash: 10f18ccc44bc71b09c0680c003c24cfb273905b079314efe1095e8ea9d714147
     dependencies:
     - name: espressif/cmake_utilities
       registry_url: https://components.espressif.com
@@ -16,7 +16,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 0.1.1
+    version: 0.1.2
   espressif/cmake_utilities:
     component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
     dependencies:
@@ -38,7 +38,7 @@ dependencies:
       type: service
     version: 1.8.2
   espressif/i2c_bus:
-    component_hash: 804ec068d163570fd367b279a310ca383484630d2310c586b50def0bcf21de13
+    component_hash: 483112c1619c54c38d0b734fb25f1678733267858a77b7af2f48cc7db6dbbd84
     dependencies:
     - name: espressif/cmake_utilities
       registry_url: https://components.espressif.com
@@ -50,15 +50,15 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.5.1
+    version: 1.5.2
   idf:
     source:
       type: idf
-    version: 5.5.1
+    version: 6.0.1
 direct_dependencies:
 - espressif/bmi270_sensor
 - espressif/esp-dsp
 - idf
-manifest_hash: 6067deefff40c8734b7892f03f7041b844212d298a710f25c794ec6e75c39301
+manifest_hash: 42058faa86141449b936f5adcd7324fae67d73f1727fd4de405d52984099c268
 target: esp32s3
-version: 2.0.0
+version: 3.0.0
